@@ -20,6 +20,9 @@ docker_rec_version='1.2.0'
 ctns_path="ctns"
 config_file="$ctns_path"/"$service".yml
 cidname="$service"  # TODO if --node exists, then $service-$node
+[[ ! -z $node ]] && {
+  cidname="$service"-"$node"
+}
 cidpath="cids"/"$user"
 cidfile="$cidpath"/"$cidname".cid
 cidbootstrap="$cidpath"/"$cidname"_bootstrap.cid
