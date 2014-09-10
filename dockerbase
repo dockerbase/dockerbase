@@ -1,0 +1,474 @@
+#!/bin/bash
+user=`whoami` # TODO or --user USERNAME
+command=$1
+service=$2
+node=$3
+
+# command: list, pull, oneshot, run, start, stop, rm, status, restart, backup, restore, logs
+# service: jenkins, java, ruby, gerrit, ...
+
+echo user: $user
+echo command: $command
+echo service: $service
+echo node: $node
+
+cd "$(dirname "$0")"
+
+docker_min_version='1.2.0'
+docker_rec_version='1.2.0'
+
+ctns_path="ctns"
+config_file="$ctns_path"/"$service".yml
+cidname="$service"  # TODO if --node exists, then $service-$node
+cidpath="cids"/"$user"
+cidfile="$cidpath"/"$cidname".cid
+cidbootstrap="$cidpath"/"$cidname"_bootstrap.cid
+local_container=local_dockerbase
+image=dockerbase/"$service"
+
+docker_path=`which docker.io || which docker`
+docker_ip=`/sbin/ifconfig | \
+           grep -B1 "inet addr" | \
+           awk '{ if ( $1 == "inet" ) { print $2 } else if ( $2 == "Link" ) { printf "%s:" ,$1 } }' | \
+           grep docker0 | \
+           awk -F: '{ print $3 }';`
+docker_version=($($docker_path --version))
+docker_version=${docker_version[2]//,/}  # Get version alone and strip comma if exists
+
+usage () {
+  echo "Usage: dockerbase COMMAND SERVICE [--user USERNAME] [--node NODENAME]"
+  echo "Commands:"
+  echo "    start:      Start/initialize a container"
+  echo "    stop:       Stop a running container"
+  echo "    restart:    Restart a container"
+  echo "    destroy:    Stop and remove a container"
+  echo "    enter:      Use nsenter to enter a container"
+  echo "    ssh:        Start a bash shell in a running container"
+  echo "    logs:       Docker logs for container"
+  echo "    bootstrap:  Bootstrap a container for the config based on a template"
+  echo "    rebuild:    Rebuild a container (destroy old, bootstrap, start new)"
+  echo
+  echo "Options:"
+  echo "    --skip-prereqs     Don't check prerequisites"
+  echo "    --user USERNAME    Set USERNAME"
+  echo "    --node NODENAME    Set NODENAME"
+  exit 1
+}
+
+compare_version() {
+    declare -a ver_a
+    declare -a ver_b
+    IFS=. read -a ver_a <<< "$1"
+    IFS=. read -a ver_b <<< "$2"
+
+    while [[ -n $ver_a ]]; do
+        if (( ver_a < ver_b )); then
+            return 0
+        elif (( ver_b > ver_a )); then
+            return 1
+        else
+            unset ver_a[0]
+            ver_a=("${ver_a[@]}")
+            unset ver_b[0]
+            ver_b=("${ver_b[@]}")
+        fi
+    done
+    return 1  # They are equal
+}
+
+prereqs() {
+  # 1. docker daemon running?
+  test=`$docker_path info 2>/dev/null`
+
+  if [[ $? -ne 0 ]] ; then
+    echo "Cannot connect to the docker daemon - verify it is running and you have access"
+    exit 1
+  fi
+
+  # 2. running aufs 
+  test=`$docker_path info 2> /dev/null | grep 'Driver: aufs'`
+  if [[ "$test" =~ "aufs" ]] ; then : ; else
+    echo "Your Docker installation is not using aufs, in the past we have had issues with it"
+  fi
+
+  # 3. running recommended docker version
+  test=($($docker_path --version))  # Get docker version string
+  test=${test[2]//,/}  # Get version alone and strip comma if exists
+
+  [[ "$test" =~ "0.12.0" ]] && echo "You are running a broken version of Docker, please upgrade ASAP." && exit 1
+
+  # At least minimum version
+  if compare_version "${docker_min_version}" "${test}"; then
+    echo "ERROR: Docker version ${test} not supported, please upgrade to at least ${docker_min_version}, or recommended ${docker_rec_version}"
+    exit 1
+  fi
+
+  # Recommend best version
+  if compare_version "${docker_rec_version}" "${test}"; then
+    echo "WARNING: Docker version ${test} deprecated, recommend upgrade to ${docker_rec_version} or newer."
+  fi
+
+  # 4. able to attach stderr / out / tty
+  test=`$docker_path run -i --rm -a stdout -a stderr $image echo working`
+  if [[ "$test" =~ "working" ]] ; then : ; else
+    echo "Your Docker installation is not working correctly"
+    echo
+    exit 1
+  fi
+}
+
+get_ssh_pub_key() {
+  if tty -s ; then
+    if [[ ! -e ~/.ssh/id_rsa.pub && ! -e ~/.ssh/id_dsa.pub ]] ; then
+      echo "This user has no SSH key, but a SSH key is required to access Dockerbase container."
+      read -p "Generate a SSH key? (Y/n) " -n 1 -r
+      if [[ $REPLY =~ ^[Nn]$ ]] ; then
+        echo
+        echo WARNING: You may not be able to log in to your container.
+        echo
+      else
+        echo
+        echo Generating SSH key
+        mkdir -p ~/.ssh && ssh-keygen -f ~/.ssh/id_rsa -t rsa -N ''
+        echo
+      fi
+    fi
+  fi
+
+  ssh_pub_key="$(cat ~/.ssh/id_rsa.pub 2>/dev/null || cat ~/.ssh/id_dsa.pub)"
+}
+
+
+install_docker() {
+
+  echo "Docker is not installed, make sure you are running on the 3.8 kernel"
+  echo "The best supported Docker release is Ubuntu 12.04.03 for it run the following"
+  echo
+  echo "sudo apt-get update"
+  echo "sudo apt-get install linux-image-generic-lts-raring linux-headers-generic-lts-raring"
+  echo "sudo reboot"
+  echo
+
+  echo "sudo sh -c \"wget -qO- https://get.docker.io/gpg | apt-key add -\""
+  echo "sudo sh -c \"echo deb http://get.docker.io/ubuntu docker main > /etc/apt/sources.list.d/docker.list\""
+  echo "sudo apt-get update"
+  echo "sudo apt-get install lxc-docker"
+
+  exit 1
+}
+
+[ $# -lt 2 ] && {
+  usage
+}
+
+[ -z $docker_path ] && {
+  install_docker
+}
+
+[ ! -d $cidpath ] && {
+  mkdir -p $cidpath
+}
+
+#if [ ! -e $config_file ]
+#  then
+#    echo "Config file was not found, ensure $config_file exists"
+#    echo ""
+#    echo "Available configs ( `cd $ctns_path && ls -dm *.yml | tr -s '\n' ' ' | awk '{ gsub(/\.yml/, ""); print }'`)"
+#    exit 1
+#fi
+
+if [ "$opt" != "--skip-prereqs" ] ; then
+  prereqs
+fi
+
+if compare_version "1.2.0" "$docker_version"; then
+  echo "We recommend you upgrade docker, the version you are running has no restart policies, on reboot your container may not start up"
+  restart_policy=""
+else
+  restart_policy="--restart=always"
+fi
+
+set_volumes() {
+  volumes=`cat $config_file | $docker_path run --rm -i -a stdout -a stdin $image ruby -e \
+        "require 'yaml'; puts YAML.load(STDIN.readlines.join)['volumes'].map{|v| '-v ' << v['volume']['host'] << ':' << v['volume']['guest'] << ' '}.join"`
+}
+
+set_template_info() {
+  templates=`cat $config_file | $docker_path run --rm -i -a stdin -a stdout $image ruby -e \
+    "require 'yaml'; puts YAML.load(STDIN.readlines.join)['templates']"`
+
+
+  arrTemplates=(${templates// / })
+  config_data=$(cat $config_file)
+
+  input="hack: true"
+
+
+  for template in "${arrTemplates[@]}"
+  do
+    [ ! -z $template ] && {
+      input="$input _FILE_SEPERATOR_ $(cat $template)"
+    }
+  done
+
+  # we always want our config file last so it takes priority
+  input="$input _FILE_SEPERATOR_ $config_data"
+
+  read -r -d '' env_ruby << 'RUBY'
+  require 'yaml'
+
+  input=STDIN.readlines.join
+  # default to UTF-8 for the dbs sake
+  env = {'LANG' => 'en_US.UTF-8'}
+  input.split('_FILE_SEPERATOR_').each do |yml|
+     yml.strip!
+     begin
+       env.merge!(YAML.load(yml)['env'] || {})
+     rescue Psych::SyntaxError => e
+      puts e
+      puts "*ERROR."
+     rescue => e
+      puts yml
+      p e
+     end
+  end
+  puts env.map{|k,v| "-e\n#{k}=#{v}" }.join("\n")
+RUBY
+
+  raw=`exec echo "$input" | $docker_path run --rm -i -a stdin -a stdout $image ruby -e "$env_ruby"`
+
+  env=()
+  ok=1
+  while read i; do
+    if [ "$i" == "*ERROR." ]; then
+      ok=0
+    elif [ -n "$i" ]; then
+      env[${#env[@]}]=$i
+    fi
+  done <<< "$raw"
+
+  if [ "$ok" -ne 1 ]; then
+    echo "${env[@]}"
+    echo "YAML syntax error. Please check your ctns/*.yml config files."
+    exit 1
+  fi
+  echo "Calculated ENV: ${env[@]}"
+}
+
+run_stop(){
+  if [ ! -e $cidfile ]
+     then
+       echo "No cid found"
+       exit 1
+     else
+       $docker_path stop -t 10 `cat $cidfile`
+  fi
+}
+
+run_start(){
+  if [ ! -e $cidfile ]
+     then
+       echo "No cid found, creating a new container"
+       ports=`cat $config_file | $docker_path run --rm -i -a stdout -a stdin $image ruby -e \
+              "require 'yaml'; puts YAML.load(STDIN.readlines.join)['expose'].map{|p| '-p ' << p.to_s << ' '}.join"`
+
+       set_template_info
+       set_volumes
+
+       existing=`$docker_path ps -a | awk '{ print $1, $(NF) }' | egrep " $config$" | awk '{ print $1 }'`
+       if [ ! -z $existing ];
+       then
+         echo "Found an existing container by its name, recovering cidfile, please rerun"
+         echo $existing > $cidfile
+         exit 1
+       fi
+
+       $docker_path run $restart_policy "${env[@]}" \
+         -h "`hostname`-$user-$cidname" \
+         -e DOCKER_HOST_IP=$docker_ip --name $user-$cidname \
+         -t --cidfile $cidfile $ports \
+         -d $volumes $local_container/$user-$cidname /sbin/runit
+
+       exit 0
+     else
+       cid=`cat $cidfile`
+
+       if [ -z $cid ]
+       then
+         echo "Detected empty cid file, deleting, please re-run"
+         rm $cidfile
+         exit 1
+       fi
+
+       found=`$docker_path ps -q -a --no-trunc | grep $cid`
+       if [ -z $found ]
+       then
+         echo "Invalid cid file, deleting, please re-run"
+         rm $cidfile
+         exit 1
+       fi
+
+       echo "cid found, ensuring container is started"
+       $docker_path start `cat $cidfile`
+       exit 0
+  fi
+}
+
+run_bootstrap(){
+  get_ssh_pub_key
+
+  # Is the image available?
+  # If not, pull it here so the user is aware what's happening.
+  $docker_path history $image >/dev/null 2>&1 || $docker_path pull $image
+
+  set_template_info
+
+  base_image=`cat $config_file | $docker_path run --rm -i -a stdin -a stdout $image ruby -e \
+    "require 'yaml'; puts YAML.load(STDIN.readlines.join)['base_image']"`
+
+  update_pups=`cat $config_file | $docker_path run --rm -i -a stdin -a stdout $image ruby -e \
+    "require 'yaml'; puts YAML.load(STDIN.readlines.join)['update_pups']"`
+
+  if [[ ! X"" = X"$base_image" ]]; then
+    image=$base_image
+  fi
+
+  set_volumes
+
+  rm -f $cidbootstrap
+
+  run_command="cd /pups &&"
+  if [[ ! "false" =  $update_pups ]]; then
+    run_command="$run_command git pull &&"
+  fi
+  run_command="$run_command /pups/bin/pups --stdin"
+
+  echo $run_command
+
+  env=("${env[@]}" "-e" "SSH_PUB_KEY=$ssh_pub_key")
+
+  (exec echo "$input" | $docker_path run "${env[@]}" -e DOCKER_HOST_IP=$docker_ip --cidfile $cidbootstrap -i -a stdin -a stdout -a stderr $volumes $image \
+     /bin/bash -c "$run_command") \
+     || ($docker_path rm `cat $cidbootstrap` && rm $cidbootstrap)
+
+  [ ! -e $cidbootstrap ] && echo "FAILED TO BOOTSTRAP" && exit 1
+
+  sleep 5
+
+  $docker_path commit `cat $cidbootstrap` $local_container/$user-$cidname || echo 'FAILED TO COMMIT'
+  $docker_path rm `cat $cidbootstrap` && rm $cidbootstrap
+}
+
+case "$command" in
+  bootstrap)
+      run_bootstrap
+      echo "Successfully bootstrapped, to startup use ./dockerbase start $service"
+      exit 0
+      ;;
+
+  enter)
+
+      if [ ! -e $cidfile ]
+         then
+           echo "No cid found"
+           exit 1
+      fi
+
+      if [ ! $UID -eq 0 ] ;
+        then
+        echo "enter command must run as root, will attempt to sudo"
+        echo
+      fi
+
+      if [ ! -e bin/nsenter ]
+        then
+          echo "Downloading nsenter"
+          $docker_path pull samsaffron/nsenter
+          ($docker_path run --rm samsaffron/nsenter cat /nsenter > bin/nsenter) || exit 1
+          chmod +x bin/nsenter
+      fi
+
+      PID=$($docker_path inspect --format {{.State.Pid}} `cat $cidfile`)
+      SHELL=/bin/bash sudo -E bin/nsenter --target $PID --mount --uts --ipc --net --pid
+
+      exit 0;
+      ;;
+
+  ssh)
+      if [ ! -e $cidfile ]
+         then
+           echo "No cid found"
+           exit 1
+         else
+           cid="`cat $cidfile`"
+           address="`$docker_path port $cid 22`"
+           split=(${address//:/ })
+           exec ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i etc/insecure_key root@${split[0]} -p ${split[1]}
+      fi
+      ;;
+
+  stop)
+      run_stop
+      exit 0
+      ;;
+
+  logs)
+      if [ ! -e $cidfile ]
+         then
+           echo "No cid found"
+           exit 1
+         else
+           $docker_path logs `cat $cidfile`
+           exit 0
+      fi
+      ;;
+
+  restart)
+      run_stop
+      run_start
+      exit 0
+      ;;
+
+  start)
+      run_start
+      exit 0
+      ;;
+
+  rebuild)
+      if [ "$(git symbolic-ref --short HEAD)" == "master" ]; then
+        echo "Updating the docker instance"
+        git pull --rebase || (echo 'failed to update' && exit 1)
+      fi
+      if [ -e $cidfile ]
+        then
+          echo "Stopping old container"
+          $docker_path stop -t 10 `cat $cidfile`
+      fi
+
+      run_bootstrap
+
+      if [ -e $cidfile ]
+        then
+          $docker_path rm `cat $cidfile` && rm $cidfile
+      fi
+
+      run_start
+      exit 0
+      ;;
+
+
+  destroy)
+      if [ -e $cidfile ]
+        then
+          echo "destroying container $cidfile"
+          $docker_path stop -t 10 `cat $cidfile`
+          $docker_path rm `cat $cidfile` > /dev/null && rm $cidfile
+          exit 0
+        else
+          echo "nothing to destroy, cidfile does not exist"
+          exit 1
+      fi
+      ;;
+esac
+
+usage
