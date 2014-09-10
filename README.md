@@ -1,26 +1,24 @@
 ## DockerBase Client Tool
 
 
-This repository contains **Dockerbase** of **dockerbase** - a client tool to pull/run/start/stop/destroy services.
+This repository contains **Dockerbase** of **dockerbase** - a client tool to bootstrap/start/stop/destroy dockerbase contrainer.
 
 
-### Installation
+### Installation - TODO
 
     curl -L github.com/dockerbase/dockerbase/install.sh | sh
 
 ### Usage
 
-    sudo dockerbase pull [service]
-
-    run:
-        sudo dockerbase run [service]
+    bootstrap:
+        sudo ./dockerbase bootstrap [service]
 
     start:
-        sudo dockerbase start [service]
+        sudo ./dockerbase start [service]
 
     stop:
-        sudo dockerbase stop [service]
+        sudo ./dockerbase stop [service]
 
 ### Example
 
-    $ ./dockerbase run jenkins node1
+    $ sudo ./dockerbase bootstrap jenkins node1
