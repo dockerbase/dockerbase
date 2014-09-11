@@ -19,6 +19,11 @@ This repository contains **Dockerbase** of **dockerbase** - a client tool to boo
     stop:
         sudo ./dockerbase stop [service]
 
+### Available services
+
+    jenkins
+    tomcat8
+
 ### Example
 
-    $ sudo ./dockerbase bootstrap jenkins node1
+    $ sudo ./dockerbase bootstrap jenkins
