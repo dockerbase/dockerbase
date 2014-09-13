@@ -6,7 +6,7 @@
 # Are you looking at this in your web browser, and would like to install Dockerbase?
 # Just open up your terminal and type:
 #
-#    curl https://github.com/dockerbase/dockerbase/install.sh | sh
+#    curl -L https://raw.github.com/dockerbase/dockerbase/master/install.sh | sh
 #
 # Dockerbase currently supports:
 #   - Mac: OS X 10.6 and above
