@@ -23,6 +23,7 @@ This repository contains **Dockerbase** of **dockerbase** - a client tool to boo
 
     jenkins
     tomcat8
+    nginx
 
 ### Example
 
