@@ -50,6 +50,7 @@ usage () {
   echo "    logs:       Docker logs for container"
   echo "    bootstrap:  Bootstrap a container for the config based on a template"
   echo "    rebuild:    Rebuild a container (destroy old, bootstrap, start new)"
+  echo "    volume:     List the volume(s) in a running container"
   echo
   echo "Options:"
   echo "    --skip-prereqs     Don't check prerequisites"
@@ -394,6 +395,15 @@ case "$command" in
       PID=$($docker_path inspect --format {{.State.Pid}} `cat $cidfile`)
       SHELL=/bin/bash sudo -E bin/nsenter --target $PID --mount --uts --ipc --net --pid
 
+      exit 0;
+      ;;
+
+  volume)
+      DIR=$($docker_path inspect --format '{{json .Volumes}}' `cat $cidfile` | python -c 'import json,sys,os; obj=json.load(sys.stdin); print "\n".join(obj[k] for k in obj.keys())')
+      for D in "${DIR[@]}"; do
+        #echo "looking at $D"
+        ls -ls $D
+      done
       exit 0;
       ;;
 
