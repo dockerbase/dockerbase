@@ -1,16 +1,66 @@
 #!/bin/bash
-user=`whoami` # TODO or --user USERNAME
-command=$1
-service=$2
-node=$3
 
 # command: list, pull, oneshot, run, start, stop, rm, status, restart, backup, restore, logs
 # service: jenkins, java, ruby, gerrit, ...
 
-echo user: $user
-echo command: $command
-echo service: $service
-echo node: $node
+# set a default user
+user=`whoami`
+
+usage () {
+  echo "Usage: dockerbase [-u USERNAME] [-n NODENAME] COMMAND SERVICE"
+  echo "Commands:"
+  echo "    start:      Start/initialize a container"
+  echo "    stop:       Stop a running container"
+  echo "    restart:    Restart a container"
+  echo "    destroy:    Stop and remove a container"
+  echo "    enter:      Use nsenter to enter a container"
+  echo "    ssh:        Start a bash shell in a running container"
+  echo "    logs:       Docker logs for container"
+  echo "    bootstrap:  Bootstrap a container for the config based on a template"
+  echo "    rebuild:    Rebuild a container (destroy old, bootstrap, start new)"
+  echo "    volume:     List the volume(s) in a running container"
+  echo
+  echo "Options:"
+  #echo "    --skip-prereqs     Don't check prerequisites"
+  echo "    -u USERNAME        Set USERNAME"
+  echo "    -n NODENAME        Set NODENAME"
+  exit 1
+}
+
+# A POSIX variable
+OPTIND=1         # Reset in case getopts has been used previously in the shell.
+
+# Initialize our own variables:
+output_file=""
+verbose=0
+
+while getopts "h?vu:n:" opt; do
+    case "$opt" in
+    h|\?)
+        usage
+        exit 0
+        ;;
+    v)  verbose=1
+        ;;
+    u)  user=$OPTARG
+        ;;
+    n)  node=$OPTARG
+        ;;
+    esac
+done
+
+shift $((OPTIND-1))
+
+[ "$1" = "--" ] && shift
+
+[ $# -lt 2 ] && {
+  usage
+}
+
+command=$1
+service=$2
+
+echo "verbose=$verbose, user=$user, node=$node, command=$command, service=$service"
 
 cd "$(dirname "$0")"
 
@@ -39,27 +89,6 @@ docker_ip=`/sbin/ifconfig | \
            awk -F: '{ print $3 }';`
 docker_version=($($docker_path --version))
 docker_version=${docker_version[2]//,/}  # Get version alone and strip comma if exists
-
-usage () {
-  echo "Usage: dockerbase COMMAND SERVICE [--user USERNAME] [--node NODENAME]"
-  echo "Commands:"
-  echo "    start:      Start/initialize a container"
-  echo "    stop:       Stop a running container"
-  echo "    restart:    Restart a container"
-  echo "    destroy:    Stop and remove a container"
-  echo "    enter:      Use nsenter to enter a container"
-  echo "    ssh:        Start a bash shell in a running container"
-  echo "    logs:       Docker logs for container"
-  echo "    bootstrap:  Bootstrap a container for the config based on a template"
-  echo "    rebuild:    Rebuild a container (destroy old, bootstrap, start new)"
-  echo "    volume:     List the volume(s) in a running container"
-  echo
-  echo "Options:"
-  echo "    --skip-prereqs     Don't check prerequisites"
-  echo "    --user USERNAME    Set USERNAME"
-  echo "    --node NODENAME    Set NODENAME"
-  exit 1
-}
 
 compare_version() {
     declare -a ver_a
@@ -161,10 +190,6 @@ install_docker() {
   echo "sudo apt-get install lxc-docker"
 
   exit 1
-}
-
-[ $# -lt 2 ] && {
-  usage
 }
 
 [ -z $docker_path ] && {
