@@ -25,9 +25,11 @@ cidname="$service"  # TODO if --node exists, then $service-$node
 }
 cidpath="cids"/"$user"
 cidfile="$cidpath"/"$cidname".cid
+cidmodified="$cidpath"/"$cidname"_modified.cid
 cidbootstrap="$cidpath"/"$cidname"_bootstrap.cid
 local_container=local_dockerbase
-image=dockerbase/"$service"
+image=local_dockerbase/"$service"
+remote_image=dockerbase/"$service"
 
 docker_path=`which docker.io || which docker`
 docker_ip=`/sbin/ifconfig | \
@@ -113,12 +115,12 @@ prereqs() {
   fi
 
   # 4. able to attach stderr / out / tty
-  test=`$docker_path run -i --rm -a stdout -a stderr $image echo working`
-  if [[ "$test" =~ "working" ]] ; then : ; else
-    echo "Your Docker installation is not working correctly"
-    echo
-    exit 1
-  fi
+  #test=`$docker_path run -i --rm -a stdout -a stderr $image echo working`
+  #if [[ "$test" =~ "working" ]] ; then : ; else
+  #  echo "Your Docker installation is not working correctly"
+  #  echo
+  #  exit 1
+  #fi
 }
 
 get_ssh_pub_key() {
@@ -367,12 +369,30 @@ run_run(){
   fi
 }
 
+prepare_ruby_pups() {
+  # Is the image available?
+  # If not, pull it here so the user is aware what's happening.
+  $docker_path history $remote_image >/dev/null 2>&1 || $docker_path pull $remote_image
+
+  #docker run with a bash script to install ruby, rbenv, and pups
+  run_command="apt-get update && apt-get install -y --no-install-recommends ruby rbenv && cd / && git clone https://github.com/weimed/pups.git && apt-get clean"
+  #docker commit to local_dockerbase/"service"
+  ($docker_path run -e DOCKER_HOST_IP=$docker_ip --cidfile $cidmodified -i -a stdin -a stdout -a stderr $remote_image \
+     /bin/bash -c "$run_command") \
+     || ($docker_path rm `cat $cidmodified` && rm $cidmodified)
+
+  [ ! -e $cidmodified ] && echo "FAILED TO MODIFIED CONTAINER" && exit 1
+
+  sleep 5
+
+  $docker_path commit `cat $cidmodified` $image || echo 'FAILED TO COMMIT'
+  $docker_path rm `cat $cidmodified` && rm $cidmodified
+}
+
 run_bootstrap(){
   get_ssh_pub_key
 
-  # Is the image available?
-  # If not, pull it here so the user is aware what's happening.
-  $docker_path history $image >/dev/null 2>&1 || $docker_path pull $image
+  prepare_ruby_pups
 
   set_template_info
 
